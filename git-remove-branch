@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+import json
+from subprocess import PIPE, check_output, run
+from typing import Iterable
+
+
+def main():
+    main_branch = check_output(
+        "git symbolic-ref refs/remotes/origin/HEAD --short".split(), text=True
+    ).strip()[7:]
+    branches = sum(_get_branches(main_branch), ())
+    if not branches:
+        print("Nothing to remove.")
+        return
+    if selected := _get_selected_branches(branches):
+        run(["git", "branch", "--delete", "--force", *selected])
+    else:
+        print("Nothing selected.")
+
+
+def _get_selected_branches(branches: Iterable[str]):
+    raw_input = (
+        run(
+            [
+                "whiptail",
+                "--title",
+                "Delete Git branches",
+                "--ok-button",
+                "Delete",
+                "--checklist",
+                "Deletion is forced, be careful.",
+                "0",
+                "0",
+                "0",
+                *branches,
+            ],
+            text=True,
+            stderr=PIPE,
+        )
+    ).stderr.split()
+    # Whiptail returns list of strings wrapped in "", we use json to unwrap it.
+    return [json.loads(s) for s in raw_input]
+
+
+def _get_branches(main: str):
+    merged_branches = check_output(
+        ["git", "branch", "--merged", main, "--format=%(refname:short)"], text=True
+    ).splitlines()
+    branches = check_output(
+        [
+            "git",
+            "branch",
+            """--format=%(refname:short) %(upstream:track) %(contents:subject)""",
+        ],
+        text=True,
+    ).splitlines()
+    for row in branches:
+        branch, description = row.split(None, 1)
+        if branch == main:
+            continue
+        is_merged = branch in merged_branches
+        is_gone = description.startswith("[gone]")
+        signs = []
+        if is_merged:
+            signs.append("merged")
+        if is_gone:
+            description = description.removeprefix("[gone]")
+            signs.append("gone")
+        if signs:
+            description += f" ({','.join(signs)})"
+        yield branch, description.strip(), "on" if is_merged or is_gone else "off"
+
+
+if __name__ == "__main__":
+    main()
