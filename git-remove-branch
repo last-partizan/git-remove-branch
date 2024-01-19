@@ -5,7 +5,7 @@ import json
 from os import getenv
 from shutil import which
 from subprocess import PIPE, check_output, run
-from typing import Iterable
+from typing import Iterable, Union
 
 
 def main():
@@ -99,7 +99,7 @@ class Dialog:
         return raw.split()
 
 
-Interface = Whiptail | Dialog
+Interface = Union[Whiptail, Dialog]
 
 if __name__ == "__main__":
     main()
