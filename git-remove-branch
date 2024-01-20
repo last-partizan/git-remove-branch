@@ -1,87 +1,110 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import json
-from os import getenv
 from shutil import which
 from subprocess import PIPE, check_output, run
 from typing import Iterable, Union
 
 
-def main():
-    main_branch = check_output(
-        "git symbolic-ref refs/remotes/origin/HEAD --short".split(), text=True
-    ).strip()[7:]
-    preferable = [getenv("GIT_REMOVE_BRANCH_DIALOG", "dialog")]
-    for cls in sorted(
-        filter(lambda c: which(c.command), [Dialog, Whiptail]),
-        key=lambda c: preferable.index(c.command) if c.command in preferable else 1,
-    ):
-        interface = cls()
-        break
-    else:
-        print("Requires 'dialog' or 'whiptail'.")
-        return
-    branches = sum(_get_branches(main_branch), ())
-    if not branches:
-        print("Nothing to remove.")
-        return
-    if selected := _get_selected_branches(interface, branches):
-        run(["git", "branch", "--delete", "--force", *selected])
-    else:
-        print("Nothing selected.")
+class App:
+    def __init__(self, force=False, prefer="dialog"):
+        self._force = force
+        self._preferrable = [prefer]
+        self._main_branch = check_output(
+            "git symbolic-ref refs/remotes/origin/HEAD --short".split(), text=True
+        ).strip()[7:]
+        self._interface = self._get_interface()
 
+    def __call__(self):
+        if not (branches := sum(self._get_branches(), ())):
+            print("Nothing to remove.")
+            return
+        if selected := self._get_selected_branches(branches):
+            args = []
+            if self._force:
+                args.append("--force")
+            run(["git", "branch", "--delete", *args, *selected])
+        else:
+            print("Nothing selected.")
 
-def _get_selected_branches(interface: Interface, branches: Iterable[str]):
-    raw_input = (
-        run(
+    def _get_interface(self):
+        for cls in sorted(
+            [c for c in INTERFACES.values() if which(c.command)],
+            key=lambda c: (
+                self._preferrable.index(c.command)
+                if c.command in self._preferrable
+                else 1
+            ),
+        ):
+            return cls()
+        else:
+            print("Requires 'dialog' or 'whiptail'.")
+            exit(1)
+
+    def _get_selected_branches(self, branches: Iterable[str]):
+        description = [
+            "Merged and gone branches are preselected.",
+            f"{MERGED_MARK} - branch is merged into {self._main_branch}.",
+            f"{GONE_MARK} - remote branch removed (gone).",
+        ]
+        if self._force:
+            description.append("Deletion is forced, be careful.")
+        raw_input = (
+            run(
+                [
+                    self._interface.command,
+                    "--title",
+                    "Delete Git branches",
+                    "--ok-button",
+                    "Delete",
+                    "--checklist",
+                    "\n".join(description),
+                    "0",
+                    "0",
+                    "0",
+                    *branches,
+                ],
+                text=True,
+                stderr=PIPE,
+            )
+        ).stderr
+        return self._interface.parse_results(raw_input)
+
+    def _get_branches(self):
+        merged_branches = check_output(
             [
-                interface.command,
-                "--title",
-                "Delete Git branches",
-                "--ok-button",
-                "Delete",
-                "--checklist",
-                "Deletion is forced, be careful.",
-                "0",
-                "0",
-                "0",
-                *branches,
+                "git",
+                "branch",
+                "--merged",
+                self._main_branch,
+                "--format=%(refname:short)",
             ],
             text=True,
-            stderr=PIPE,
-        )
-    ).stderr
-    return interface.parse_results(raw_input)
-
-
-def _get_branches(main: str):
-    merged_branches = check_output(
-        ["git", "branch", "--merged", main, "--format=%(refname:short)"], text=True
-    ).splitlines()
-    branches = check_output(
-        [
-            "git",
-            "branch",
-            """--format=%(refname:short) %(upstream:track) %(contents:subject)""",
-        ],
-        text=True,
-    ).splitlines()
-    for row in branches:
-        branch, description = row.split(None, 1)
-        if branch == main:
-            continue
-        is_merged = branch in merged_branches
-        is_gone = description.startswith("[gone]")
-        signs = []
-        if is_merged:
-            signs.append("merged")
-        if is_gone:
-            description = description.removeprefix("[gone]")
-            signs.append("gone")
-        if signs:
-            description += f" ({','.join(signs)})"
-        yield branch, description.strip(), "on" if is_merged or is_gone else "off"
+        ).splitlines()
+        branches = check_output(
+            [
+                "git",
+                "branch",
+                """--format=%(refname:short) %(upstream:track) %(contents:subject)""",
+            ],
+            text=True,
+        ).splitlines()
+        for row in branches:
+            branch, description = row.split(None, 1)
+            if branch == self._main_branch:
+                continue
+            is_merged = branch in merged_branches
+            is_gone = description.startswith("[gone]")
+            signs = []
+            if is_merged:
+                signs.append(MERGED_MARK)
+            if is_gone:
+                description = description.removeprefix("[gone]")
+                signs.append(GONE_MARK)
+            description = f"({','.join(signs)}) " + description.strip()
+            yield branch, description, "on" if is_merged or is_gone else "off"
 
 
 class Whiptail:
@@ -100,6 +123,26 @@ class Dialog:
 
 
 Interface = Union[Whiptail, Dialog]
+MERGED_MARK = "✔"
+GONE_MARK = "✘"
+INTERFACES: dict[str, type[Interface]] = {
+    cls.command: cls for cls in [Dialog, Whiptail]
+}
+
+parser = argparse.ArgumentParser(
+    prog="git-remove-branch",
+    description="Select and remove Git branches",
+)
+parser.add_argument(
+    "--force", action="store_true", help="Pass --force to 'git branch --delete'"
+)
+parser.add_argument(
+    "--prefer",
+    default="dialog",
+    choices=INTERFACES.keys(),
+    help="Select preferable program to use as dialog",
+)
 
 if __name__ == "__main__":
-    main()
+    args = parser.parse_args()
+    App(force=args.force, prefer=args.prefer)()
